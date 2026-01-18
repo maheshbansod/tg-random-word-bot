@@ -1,11 +1,13 @@
 [project]
 name = "random-word-bot"
 version = "0.1.0"
-description = "Add your description here"
+description = "A Telegram bot that sends daily vocabulary words with definitions using OpenRouter AI"
 readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
-    "google-genai>=1.32.0",
+    "openai>=1.52.0",
     "python-telegram-bot>=22.3",
-    "requests>=2.32.5",
+    "pydantic>=2.9.0",
+    "pydantic-settings>=2.5.0",
+    "structlog>=24.4.0",
 ]
