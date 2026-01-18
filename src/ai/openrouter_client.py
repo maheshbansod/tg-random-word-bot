@@ -6,6 +6,7 @@ from openai import OpenAI
 from ..config.settings import settings
 from ..utils.exceptions import AIServiceError
 from ..utils.logging import get_logger
+from .model_selector import ModelSelector
 
 logger = get_logger(__name__)
 
@@ -17,7 +18,7 @@ class OpenRouterClient:
         self.client = OpenAI(
             api_key=settings.openrouter_api_key, base_url="https://openrouter.ai/api/v1"
         )
-        self.model = settings.openrouter_model
+        self.model_selector = ModelSelector(settings)
 
     def _create_prompt(self, today: str, random_words: List[str]) -> str:
         """Create the prompt for the AI model."""
@@ -90,38 +91,75 @@ class OpenRouterClient:
         Raises:
             AIServiceError: If AI service fails
         """
-        try:
-            today = datetime.datetime.now().isoformat()
-            prompt = self._create_prompt(today, random_words)
-
-            logger.info(
-                "Generating daily words",
-                model=self.model,
-                words_count=len(random_words),
-            )
-
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=[{"role": "user", "content": prompt}],
-                # response_format={"type": "json_object"},
-            )
-
-            response_text = response.choices[0].message.content
-            logger.info("Received AI response", response_length=len(response_text))
-
-            # Parse JSON response
+        today = datetime.datetime.now().isoformat()
+        prompt = self._create_prompt(today, random_words)
+        used_models = []
+        
+        while len(used_models) < settings.max_retry_attempts:
+            model = None
             try:
-                response_data = json.loads(response_text)
-                logger.info("Successfully parsed AI response")
-                return response_data
-            except json.JSONDecodeError as e:
-                logger.error(
-                    "Failed to parse AI response as JSON",
-                    error=str(e),
-                    response=response_text,
-                )
-                raise AIServiceError(f"Invalid JSON response from AI: {e}")
+                model = self.model_selector.get_random_model(exclude_models=used_models)
+                used_models.append(model)
 
-        except Exception as e:
-            logger.error("AI service error", error=str(e))
-            raise AIServiceError(f"Failed to generate daily words: {e}")
+                logger.info(
+                    "Generating daily words",
+                    model=model,
+                    words_count=len(random_words),
+                    attempt=len(used_models),
+                )
+
+                response = self.client.chat.completions.create(
+                    model=model,
+                    messages=[{"role": "user", "content": prompt}],
+                    # response_format={"type": "json_object"},
+                )
+
+                response_text = response.choices[0].message.content
+                if response_text is None:
+                    raise ValueError("Received empty response from AI")
+                    
+                logger.info("Received AI response", response_length=len(response_text))
+
+                # Parse JSON response
+                try:
+                    response_data = json.loads(response_text)
+                    logger.info(
+                        "Successfully parsed AI response",
+                        model=model,
+                        usage_stats=self.model_selector.get_usage_stats()
+                    )
+                    return response_data
+                except json.JSONDecodeError as e:
+                    logger.error(
+                        "Failed to parse AI response as JSON",
+                        error=str(e),
+                        response=response_text,
+                        model=model,
+                    )
+                    self.model_selector.mark_model_failed(model, e)
+                    continue
+
+            except Exception as e:
+                logger.error(
+                    "AI service error with model",
+                    error=str(e),
+                    model=model or 'unknown',
+                    attempt=len(used_models),
+                )
+                if model:
+                    self.model_selector.mark_model_failed(model, e)
+                
+                # Try next model if available
+                next_model = self.model_selector.get_model_for_retry(used_models)
+                if next_model is None:
+                    break
+                continue
+
+        # All models failed
+        logger.error(
+            "All models failed to generate daily words",
+            used_models=used_models,
+            failed_models=list(self.model_selector.failed_models),
+            max_attempts=settings.max_retry_attempts,
+        )
+        raise AIServiceError("All available models failed to generate daily words")
